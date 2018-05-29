@@ -161,6 +161,7 @@ func (mr *Master) Wait() {
 func (mr *Master) killWorkers() []int {
 	mr.Lock()
 	defer mr.Unlock()
+
 	ntasks := make([]int, 0, len(mr.workers))
 	for _, w := range mr.workers {
 		debug("Master: shutdown worker %s\n", w)
