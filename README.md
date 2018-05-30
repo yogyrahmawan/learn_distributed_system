@@ -10,5 +10,6 @@ See instructions dir for lab instructions
 * Sequencial Map Reduce 
 * Single worker word count 
 * Distributed Map Reduce Jobs
+* Handling Worker Failures
 
 tba 

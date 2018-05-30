@@ -36,7 +36,7 @@ and: 23612
 the: 29748
 ```
 
-### Part 4 Distributing Map Reduce Tasks 
+### Part 3 Distributing Map Reduce Tasks 
 Your current implementation runs the map and reduce tasks one at a time. One of Map/Reduce's biggest selling points is that it can automatically parallelize ordinary sequential code without any extra work by the developer. In this part of the lab, you will complete a version of MapReduce that splits the work over a set of worker threads that run in parallel on multiple cores. While not distributed across multiple machines as in real Map/Reduce deployments, your implementation will use RPC to simulate distributed computation.
 
 The code in mapreduce/master.go does most of the work of managing a MapReduce job. We also supply you with the complete code for a worker thread, in mapreduce/worker.go, as well as some code to deal with RPC in mapreduce/common_rpc.go.
@@ -52,3 +52,11 @@ Use the call() function in mapreduce/common_rpc.go to send an RPC to a worker. T
 Your solution to Part III should only involve modifications to schedule.go. If you modify other files as part of debugging, please restore their original contents and then test before submitting.
 
 Use `go test -run TestParallel` to test your solution. This will execute two tests, TestParallelBasic and TestParallelCheck; the latter verifies that your scheduler causes workers to execute tasks in parallel. 
+
+### part 4 Handling Worker Failures
+In this part you will make the master handle failed workers. MapReduce makes this relatively easy because workers don't have persistent state. If a worker fails while handling an RPC from the master, the master's call() will eventually return false due to a timeout. In that situation, the master should re-assign the task given to the failed worker to another worker.
+
+An RPC failure doesn't necessarily mean that the worker didn't execute the task; the worker may have executed it but the reply was lost, or the worker may still be executing but the master's RPC timed out. Thus, it may happen that two workers receive the same task, compute it, and generate output. Two invocations of a map or reduce function are required to generate the same output for a given input (i.e. the map and reduce functions are "functional"), so there won't be inconsistencies if subsequent processing sometimes reads one output and sometimes the other. In addition, the MapReduce framework ensures that map and reduce function output appears atomically: the output file will either not exist, or will contain the entire output of a single execution of the map or reduce function (the lab code doesn't actually implement this, but instead only fails workers at the end of a task, so there aren't concurrent executions of a task). 
+```
+$ go test -run Failure
+```

@@ -2,8 +2,13 @@ package mapreduce
 
 import (
 	"fmt"
-	"sync"
+	"sync/atomic"
 )
+
+type scheduleJobs struct {
+	dargs  *DoTaskArgs
+	worker string
+}
 
 //
 // schedule() starts and waits for all tasks in the given phase (mapPhase
@@ -38,6 +43,11 @@ func schedule(jobName string, mapFiles []string, nReduce int, phase jobPhase, re
 
 	// waiting for worker
 	availChan := make(chan string, 2)
+	jobQueue := make(chan *DoTaskArgs, 50)
+	finish := make(chan struct{})
+
+	var jobTracker int32
+	// worker producer
 	go func() {
 		for {
 			select {
@@ -47,25 +57,43 @@ func schedule(jobName string, mapFiles []string, nReduce int, phase jobPhase, re
 		}
 	}()
 
-	var wg sync.WaitGroup
-	for i := 0; i < ntasks; i++ {
-		wg.Add(1)
-		select {
-		case args := <-availChan:
-			go func(i int, wg *sync.WaitGroup, args string) {
-				defer wg.Done()
-				call(args, "Worker.DoTask", DoTaskArgs{
-					JobName:       jobName,
-					File:          mapFiles[i],
-					Phase:         phase,
-					TaskNumber:    i,
-					NumOtherPhase: nother,
-				}, nil)
-				availChan <- args
-			}(i, &wg, args)
+	// start consumer
+	atomic.StoreInt32(&jobTracker, 1)
+	go func() {
+		for atomic.LoadInt32(&jobTracker) > 0 {
+			select {
+			case args := <-availChan:
+				go func(args string) {
+					job := <-jobQueue
+					ok := call(args, "Worker.DoTask", job, nil)
+					if ok {
+						atomic.AddInt32(&jobTracker, -1)
+						availChan <- args
+					} else {
+						jobQueue <- job
+					}
+				}(args)
+			}
 		}
-	}
-	wg.Wait()
+		finish <- struct{}{}
+	}()
 
+	// start producer
+	atomic.StoreInt32(&jobTracker, 0)
+	for i := 0; i < ntasks; i++ {
+		go func(i int) {
+			dta := &DoTaskArgs{
+				JobName:       jobName,
+				File:          mapFiles[i],
+				Phase:         phase,
+				TaskNumber:    i,
+				NumOtherPhase: nother,
+			}
+
+			atomic.AddInt32(&jobTracker, 1)
+			jobQueue <- dta
+		}(i)
+	}
+	<-finish
 	fmt.Printf("Schedule: %v done\n", phase)
 }
