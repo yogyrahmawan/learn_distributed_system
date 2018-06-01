@@ -3,6 +3,7 @@ package mapreduce
 import (
 	"fmt"
 	"sync/atomic"
+	"time"
 )
 
 type scheduleJobs struct {
@@ -42,12 +43,12 @@ func schedule(jobName string, mapFiles []string, nReduce int, phase jobPhase, re
 	// only one task for one worker
 
 	// waiting for worker
-	availChan := make(chan string, 2)
-	jobQueue := make(chan *DoTaskArgs, 50)
+	availChan := make(chan string)
+	jobQueue := make(chan *DoTaskArgs, 10)
 	finish := make(chan struct{})
 
 	var jobTracker int32
-	// worker producer
+	// worker receiver
 	go func() {
 		for {
 			select {
@@ -58,28 +59,48 @@ func schedule(jobName string, mapFiles []string, nReduce int, phase jobPhase, re
 	}()
 
 	// start consumer
-	atomic.StoreInt32(&jobTracker, 1)
+	atomic.StoreInt32(&jobTracker, int32(ntasks-1))
 	go func() {
-		for atomic.LoadInt32(&jobTracker) > 0 {
+		for job := range jobQueue {
+			if atomic.LoadInt32(&jobTracker) <= 0 {
+				finish <- struct{}{}
+			}
 			select {
 			case args := <-availChan:
-				go func(args string) {
-					job := <-jobQueue
-					ok := call(args, "Worker.DoTask", job, nil)
-					if ok {
-						atomic.AddInt32(&jobTracker, -1)
-						availChan <- args
-					} else {
+				go func(args string, job *DoTaskArgs) {
+					//job := <-jobQueue
+					c1 := make(chan bool, 1)
+
+					go func() {
+						ok := call(args, "Worker.DoTask", job, nil)
+						c1 <- ok
+					}()
+
+					select {
+					case res := <-c1:
+						if atomic.LoadInt32(&jobTracker) <= 0 {
+							finish <- struct{}{}
+						}
+
+						if res {
+							atomic.AddInt32(&jobTracker, -1)
+							availChan <- args
+						} else {
+							jobQueue <- job
+						}
+					case <-time.After(3 * time.Second):
+						if atomic.LoadInt32(&jobTracker) <= 0 {
+							finish <- struct{}{}
+						}
 						jobQueue <- job
 					}
-				}(args)
+				}(args, job)
 			}
 		}
 		finish <- struct{}{}
 	}()
 
 	// start producer
-	atomic.StoreInt32(&jobTracker, 0)
 	for i := 0; i < ntasks; i++ {
 		go func(i int) {
 			dta := &DoTaskArgs{
@@ -89,8 +110,6 @@ func schedule(jobName string, mapFiles []string, nReduce int, phase jobPhase, re
 				TaskNumber:    i,
 				NumOtherPhase: nother,
 			}
-
-			atomic.AddInt32(&jobTracker, 1)
 			jobQueue <- dta
 		}(i)
 	}
