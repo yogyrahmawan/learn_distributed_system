@@ -87,6 +87,7 @@ type Raft struct {
 	// additional data goes here
 	heartbeatRun      bool
 	appendEntriesChan chan *AppendEntriesArgs
+	leaderChan        chan struct{}
 	stopHeartbeatChan chan struct{}
 }
 
@@ -156,27 +157,24 @@ type AppendEntriesReply struct {
 
 // AppendEntries implement append entries rpc
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	//fmt.Printf("start append entries at %d, term %d from %d \n", rf.me, rf.currentTerm, args.LeaderID)
 	rf.mu.Lock()
-	//fmt.Printf("after start append entries at %d, term %d from %d \n", rf.me, rf.currentTerm, args.LeaderID)
-	defer func() {
-		//fmt.Printf("end append entries at %d, term %d from %d \n", rf.me, rf.currentTerm, args.LeaderID)
-		rf.mu.Unlock()
-	}()
 	reply.Success = false
 	if args.Term < rf.currentTerm {
+		rf.mu.Unlock()
 		return
-	}
-	// lab 2 A doesnt include log. leave it for now
-	rf.state = followerState
-	rf.leader = args.LeaderID
-
-	if args.Term > rf.currentTerm {
-		rf.currentTerm = args.Term
 	}
 
 	reply.Success = true
 	reply.Term = rf.currentTerm
+
+	rf.leader = args.LeaderID
+
+	if args.Term > rf.currentTerm {
+		rf.currentTerm = args.Term
+
+	}
+	rf.state = followerState
+	rf.mu.Unlock()
 
 	rf.appendEntriesChan <- args
 }
@@ -214,12 +212,8 @@ type RequestVoteReply struct {
 // least as up-to-date as receiver’s log, grant vote
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
-	//fmt.Printf("start request vote at %d, term %d \n", rf.me, rf.currentTerm)
-	defer func() {
-		//fmt.Printf("end request vote at %d, term %d \n", rf.me, rf.currentTerm)
-		rf.mu.Unlock()
+	defer rf.mu.Unlock()
 
-	}()
 	// Reply false if term < currentTerm
 	reply.Term = rf.currentTerm
 	reply.VoteGranted = false
@@ -333,7 +327,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.appendEntriesChan = make(chan *AppendEntriesArgs)
 	rf.stopHeartbeatChan = make(chan struct{}, 2)
 	rand.Seed(time.Now().Unix())
-	go rf.serverLoop()
+	go rf.loop()
 	//go rf.sendHeartbeat()
 
 	// initialize from state persisted before a crash
@@ -342,20 +336,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	return rf
 }
 
-func (rf *Raft) sendHeartbeat() {
-	for {
-		time.Sleep(120 * time.Millisecond)
-		select {
-		case <-rf.stopHeartbeatChan:
-			return
-		default:
-			rf.mu.Lock()
-			rf.sendHeartbeatImmediately()
-			rf.mu.Unlock()
-		}
-
-		//time.Sleep(120 * time.Millisecond)
-	}
+func (rf *Raft) getServerState() uint {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	return rf.state
 }
 
 func (rf *Raft) sendHeartbeatImmediately() {
@@ -374,7 +358,7 @@ func (rf *Raft) sendHeartbeatImmediately() {
 			prevLogIndex = len(rf.log) - 1
 			prevLogTerm = rf.log[len(rf.log)-1].Term
 		}
-		//wg.Add(1)
+
 		go func(k int, currentTerm uint, leaderID int, prevLogIndex, prevLogTerm int) {
 			//defer wg.Done()
 			args := AppendEntriesArgs{
@@ -388,28 +372,66 @@ func (rf *Raft) sendHeartbeatImmediately() {
 
 			reply := AppendEntriesReply{}
 			rf.sendAppendEntries(k, &args, &reply)
+			//if reply.
 
 		}(k, rf.currentTerm, rf.leader, prevLogIndex, prevLogTerm)
 	}
 
 }
 
-func (rf *Raft) serverLoop() {
+func (rf *Raft) setState(state uint) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	rf.state = state
+}
+
+func (rf *Raft) loop() {
+	for {
+		switch rf.getServerState() {
+		case leaderState:
+			rf.leaderLoop()
+		case candidateState:
+			rf.candidateLoop()
+		case followerState:
+			rf.followerLoop()
+		}
+	}
+}
+
+func (rf *Raft) followerLoop() {
 	for {
 		select {
 		case <-rf.appendEntriesChan:
-		case <-time.After(time.Duration(random(300, 400)) * time.Millisecond):
-			rf.startElection()
+		case <-time.After(time.Duration(random(400, 500)) * time.Millisecond):
+			rf.setState(candidateState)
+			return
 		}
+	}
+}
+
+func (rf *Raft) candidateLoop() {
+	rf.startElection()
+	for rf.getServerState() == candidateState {
+		select {
+		case <-rf.appendEntriesChan:
+		case <-time.After(time.Duration(random(400, 500)) * time.Millisecond):
+			return
+		}
+	}
+}
+
+func (rf *Raft) leaderLoop() {
+	for rf.getServerState() == leaderState {
+		rf.mu.Lock()
+		rf.sendHeartbeatImmediately()
+		rf.mu.Unlock()
+		time.Sleep(120 * time.Millisecond)
+
 	}
 }
 
 func (rf *Raft) startElection() {
 	rf.mu.Lock()
-	if rf.state == leaderState {
-		rf.mu.Unlock()
-		return
-	}
 	if rf.heartbeatRun {
 		rf.stopHeartbeatChan <- struct{}{}
 		rf.heartbeatRun = false
@@ -477,6 +499,7 @@ func (rf *Raft) startElection() {
 			continue
 		}
 	}
+
 	if accepted >= len(rf.peers)/2 {
 		rf.mu.Lock()
 		if rf.leader == -1 {
@@ -484,7 +507,6 @@ func (rf *Raft) startElection() {
 			rf.state = leaderState
 			rf.sendHeartbeatImmediately()
 			rf.heartbeatRun = true
-			go rf.sendHeartbeat()
 		}
 
 		rf.mu.Unlock()
