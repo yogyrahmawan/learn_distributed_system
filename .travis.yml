@@ -1,9 +1,9 @@
 language: go
 go:
   - 1.10.x
-script:
-  - cd main && time go run wc.go master sequential pg-*.txt && cd .. 
-  - cd mapreduce && go test -run Sequential
+install: true
+script: 
+  - cd mapreduce && go test -run Sequential && cd ..
   - cd mapreduce && go test -race -run TestParallel && cd ..
   - cd mapreduce && go test -race -run Failure
 notifications:

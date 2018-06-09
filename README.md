@@ -1,3 +1,4 @@
+[![Build Status](https://travis-ci.com/yogyrahmawan/learn_distributed_system.png)](https://travis-ci.com/yogyrahmawan/learn_distributed_system)
 ## learning distributed system from 6.824 Spring 2018 
 
 ### instructions 
