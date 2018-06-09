@@ -1,0 +1,12 @@
+language: go
+go:
+  - 1.10.x
+before_install:
+  - go get github.com/mattn/goveralls
+script:
+  - cd main && time go run wc.go master sequential pg-*.txt && cd .. 
+  - cd mapreduce && go test -run Sequential
+  - cd mapreduce && go test -race -run TestParallel && cd ..
+  - cd mapreduce && go test -race -run Failure
+notifications:
+  email: false
