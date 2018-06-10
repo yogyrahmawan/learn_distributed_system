@@ -410,10 +410,29 @@ func (rf *Raft) followerLoop() {
 }
 
 func (rf *Raft) candidateLoop() {
-	rf.startElection()
+	voteAccepted := 0
+	replyChan := rf.startElection()
 	for rf.getServerState() == candidateState {
 		select {
 		case <-rf.appendEntriesChan:
+		case reply := <-replyChan:
+
+			// a candidate wins an election if it receives votes from a majority of the servers in the full cluseter for same term
+			// each server will vote at most 1 canditate in given term
+			if reply.VoteGranted {
+				voteAccepted++
+			}
+
+			if voteAccepted >= (len(rf.peers)/2)+1 {
+				rf.mu.Lock()
+				if rf.leader == -1 {
+					rf.leader = rf.me
+					rf.state = leaderState
+					rf.sendHeartbeatImmediately()
+				}
+
+				rf.mu.Unlock()
+			}
 		case <-time.After(time.Duration(random(400, 500)) * time.Millisecond):
 			return
 		}
@@ -430,22 +449,21 @@ func (rf *Raft) leaderLoop() {
 	}
 }
 
-func (rf *Raft) startElection() {
+func (rf *Raft) startElection() chan *RequestVoteReply {
 	rf.mu.Lock()
-	if rf.heartbeatRun {
-		rf.stopHeartbeatChan <- struct{}{}
-		rf.heartbeatRun = false
-	}
+	defer rf.mu.Unlock()
 	rf.leader = -1
 	rf.currentTerm++
 	rf.votedFor = rf.me
 	rf.state = candidateState
 
-	replyChan := make(chan RequestVoteReply, len(rf.peers))
-	nextChan := make(chan struct{}, 2)
+	replyChan := make(chan *RequestVoteReply, len(rf.peers))
 	for i := 0; i < len(rf.peers); i++ {
 		if i == rf.me {
-			nextChan <- struct{}{}
+			replyChan <- &RequestVoteReply{
+				Term:        rf.currentTerm,
+				VoteGranted: true,
+			}
 			continue
 		}
 
@@ -455,7 +473,6 @@ func (rf *Raft) startElection() {
 			lastLogTerm = rf.log[len(rf.log)-1].Term
 		}
 		go func(i, lastLogIdx, lastLogTerm int, currentTerm uint, votedFor int) {
-			okReceiverChan := make(chan bool)
 			args := RequestVoteArgs{
 				Term:         currentTerm,
 				CandidateID:  uint(votedFor),
@@ -465,52 +482,13 @@ func (rf *Raft) startElection() {
 
 			reply := RequestVoteReply{}
 
-			go func(i int, args *RequestVoteArgs, reply *RequestVoteReply) {
-				ok := rf.sendRequestVote(i, args, reply)
-				okReceiverChan <- ok
-			}(i, &args, &reply)
+			rf.sendRequestVote(i, &args, &reply)
 
-			select {
-			case ok := <-okReceiverChan:
-				if ok {
-					replyChan <- reply
-				} else {
-					nextChan <- struct{}{}
-				}
-			case <-time.After(100 * time.Millisecond):
-				nextChan <- struct{}{}
-			}
-
+			replyChan <- &reply
 		}(i, lastLogIdx, lastLogTerm, rf.currentTerm, rf.votedFor)
 	}
-	rf.mu.Unlock()
 
-	// a candidate wins an election if it receives votes from a majority of the servers in the full cluseter for same term
-	// each server will vote at most 1 canditate in given term
-	accepted := 0
-	for i := 0; i < len(rf.peers); i++ {
-
-		select {
-		case r := <-replyChan:
-			if r.VoteGranted {
-				accepted++
-			}
-		case <-nextChan:
-			continue
-		}
-	}
-
-	if accepted >= len(rf.peers)/2 {
-		rf.mu.Lock()
-		if rf.leader == -1 {
-			rf.leader = rf.me
-			rf.state = leaderState
-			rf.sendHeartbeatImmediately()
-			rf.heartbeatRun = true
-		}
-
-		rf.mu.Unlock()
-	}
+	return replyChan
 
 }
 

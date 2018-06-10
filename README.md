@@ -13,4 +13,8 @@ See instructions dir for lab instructions
 * Distributed Map Reduce Jobs
 * Handling Worker Failures
 
-tba 
+### Lab 2 Raft
+##### Reading material
+[raft_paper](https://raft.github.io/raft.pdf)
+
+* Lab 2A : Leader election

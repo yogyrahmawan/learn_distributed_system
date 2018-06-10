@@ -5,6 +5,7 @@ install: true
 script: 
   - cd mapreduce && go test -run Sequential && cd ..
   - cd mapreduce && go test -race -run TestParallel && cd ..
-  - cd mapreduce && go test -race -run Failure
+  - cd mapreduce && go test -race -run Failure & cd ..
+  - cd raft && go test -race -run 2A & cd ..
 notifications:
   email: false
