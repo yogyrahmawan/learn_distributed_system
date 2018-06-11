@@ -18,6 +18,8 @@ package raft
 //
 
 import (
+	"fmt"
+	"math"
 	"math/rand"
 	"sync"
 	"time"
@@ -85,10 +87,7 @@ type Raft struct {
 	matchIndex map[uint]uint
 
 	// additional data goes here
-	heartbeatRun      bool
 	appendEntriesChan chan *AppendEntriesArgs
-	leaderChan        chan struct{}
-	stopHeartbeatChan chan struct{}
 }
 
 // GetState return currentTerm and whether this server
@@ -158,14 +157,19 @@ type AppendEntriesReply struct {
 // AppendEntries implement append entries rpc
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
+
+	logOk := args.PrevLogIndex == 0 ||
+		(args.PrevLogIndex > 0 && args.PrevLogIndex <= len(rf.log) && args.PrevLogTerm == rf.log[args.PrevLogIndex].Term)
+
 	reply.Success = false
-	if args.Term < rf.currentTerm {
+	reply.Term = rf.currentTerm
+	if args.Term < rf.currentTerm || (args.Term == rf.currentTerm && !logOk) {
+		fmt.Printf("returning, logOk = %v , args.PrevLogIndex = %d , len(rf.log) = %d \n", logOk, args.PrevLogIndex, len(rf.log))
 		rf.mu.Unlock()
 		return
 	}
 
 	reply.Success = true
-	reply.Term = rf.currentTerm
 
 	rf.leader = args.LeaderID
 
@@ -173,7 +177,29 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.currentTerm = args.Term
 
 	}
-	rf.state = followerState
+
+	if rf.state != followerState {
+		rf.state = followerState
+	}
+
+	// if existing entry conflicts with a new one (same index
+	// but different terms), delete the existing entry and all that
+	// follow it
+	if len(rf.log) != 0 && len(args.Entries) > 0 {
+		if len(rf.log)-1 == args.PrevLogIndex &&
+			rf.currentTerm != uint(args.PrevLogTerm) {
+			rf.log = rf.log[:len(rf.log)-1]
+		}
+		rf.log = append(rf.log, args.Entries...)
+	}
+
+	// If leaderCommit > commitIndex, set commitIndex =
+	// min(leaderCommit, index of last new entry)
+	if uint(args.LeadersCommit) > rf.commitIndex {
+		rf.commitIndex = uint(math.Min(float64(args.LeadersCommit), float64(len(rf.log))))
+	} else {
+		rf.commitIndex = uint(args.LeadersCommit)
+	}
 	rf.mu.Unlock()
 
 	rf.appendEntriesChan <- args
@@ -287,9 +313,21 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index := -1
 	term := -1
-	isLeader := true
 
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	isLeader := rf.state == leaderState
 	// Your code here (2B).
+	if !isLeader {
+		return index, term, isLeader
+	}
+	index = len(rf.log) - 1 + 1
+	rf.log = append(rf.log, Log{Term: term, Command: command})
+	term = int(rf.currentTerm)
+
+	fmt.Println(index)
+	fmt.Println(term)
+	fmt.Println("is leader")
 
 	return index, term, isLeader
 }
@@ -324,11 +362,13 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.state = followerState
 	rf.leader = -1
 	// Your initialization code here (2A, 2B, 2C).
-	rf.appendEntriesChan = make(chan *AppendEntriesArgs)
-	rf.stopHeartbeatChan = make(chan struct{}, 2)
+	rf.appendEntriesChan = make(chan *AppendEntriesArgs, 3) // make non blocking
 	rand.Seed(time.Now().Unix())
+
+	rf.matchIndex = make(map[uint]uint)
+	rf.nextIndex = make(map[uint]uint)
+
 	go rf.loop()
-	//go rf.sendHeartbeat()
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
@@ -342,41 +382,54 @@ func (rf *Raft) getServerState() uint {
 	return rf.state
 }
 
+func (rf *Raft) buildAndSendAppendEntry(k int, currentTerm uint, leaderID int, prevLogIndex, prevLogTerm int, entries []Log, commitIndex uint) {
+	args := AppendEntriesArgs{
+		Term:          currentTerm,
+		LeaderID:      leaderID,
+		PrevLogIndex:  prevLogIndex,
+		PrevLogTerm:   prevLogTerm,
+		LeadersCommit: int(commitIndex),
+		Entries:       entries,
+	}
+
+	reply := AppendEntriesReply{}
+	rf.sendAppendEntries(k, &args, &reply)
+
+}
+
 func (rf *Raft) sendHeartbeatImmediately() {
 	if rf.leader != rf.me || rf.state != leaderState {
 		return
 	}
 
-	//done := make(chan int, len(rf.peers))
-	//var wg sync.WaitGroup
 	for k := 0; k < len(rf.peers); k++ {
 		if k == rf.me {
 			continue
 		}
-		prevLogIndex, prevLogTerm := -1, -1
-		if len(rf.log) > 0 {
-			prevLogIndex = len(rf.log) - 1
-			prevLogTerm = rf.log[len(rf.log)-1].Term
+		prevLogIndex := int(rf.nextIndex[uint(k)]) - 1
+		prevLogTerm := 0
+		if prevLogIndex > 0 {
+			prevLogTerm = rf.log[prevLogIndex].Term
+		}
+		go rf.buildAndSendAppendEntry(k, rf.currentTerm, rf.leader, int(prevLogIndex), prevLogTerm, []Log{}, rf.commitIndex)
+	}
+}
+
+func (rf *Raft) triggerAppendEntries() {
+	for k := 0; k < len(rf.peers); k++ {
+		if k == rf.me {
+			continue
 		}
 
-		go func(k int, currentTerm uint, leaderID int, prevLogIndex, prevLogTerm int) {
-			//defer wg.Done()
-			args := AppendEntriesArgs{
-				Term:         currentTerm,
-				LeaderID:     leaderID,
-				PrevLogIndex: prevLogIndex,
-				PrevLogTerm:  prevLogTerm,
+		prevLogIndex := int(rf.nextIndex[uint(k)]) - 1
+		prevLogTerm := 0
+		if prevLogIndex > 0 {
+			prevLogTerm = rf.log[prevLogIndex].Term
+		}
+		lastEntry := uint(math.Min(float64(len(rf.log)-1), float64(rf.nextIndex[uint(k)]-1)))
 
-				// TODO entries and leaders commit
-			}
-
-			reply := AppendEntriesReply{}
-			rf.sendAppendEntries(k, &args, &reply)
-			//if reply.
-
-		}(k, rf.currentTerm, rf.leader, prevLogIndex, prevLogTerm)
+		go rf.buildAndSendAppendEntry(k, rf.currentTerm, rf.leader, int(prevLogIndex), prevLogTerm, rf.log[int(lastEntry):len(rf.log)], rf.commitIndex)
 	}
-
 }
 
 func (rf *Raft) setState(state uint) {
@@ -402,7 +455,7 @@ func (rf *Raft) followerLoop() {
 	for {
 		select {
 		case <-rf.appendEntriesChan:
-		case <-time.After(time.Duration(random(400, 500)) * time.Millisecond):
+		case <-time.After(time.Duration(random(300, 400)) * time.Millisecond):
 			rf.setState(candidateState)
 			return
 		}
@@ -428,13 +481,27 @@ func (rf *Raft) candidateLoop() {
 				if rf.leader == -1 {
 					rf.leader = rf.me
 					rf.state = leaderState
+
+					// transition to be leader
+					// set index
+					rf.updateIndexForFollower()
 					rf.sendHeartbeatImmediately()
 				}
 
 				rf.mu.Unlock()
 			}
-		case <-time.After(time.Duration(random(400, 500)) * time.Millisecond):
+		case <-time.After(time.Duration(random(300, 400)) * time.Millisecond):
 			return
+		}
+	}
+}
+
+// update matchindex and nextindex
+func (rf *Raft) updateIndexForFollower() {
+	for k := range rf.peers {
+		if k != rf.me {
+			rf.matchIndex[uint(k)] = 0
+			rf.nextIndex[uint(k)] = uint(len(rf.log) + 1)
 		}
 	}
 }
