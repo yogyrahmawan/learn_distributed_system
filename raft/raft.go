@@ -88,6 +88,10 @@ type Raft struct {
 
 	// additional data goes here
 	appendEntriesChan chan *AppendEntriesArgs
+	heartbeatChan     chan struct{}
+	commandChan       chan string
+	heartbeatRun      bool
+	stopHeartbeatChan chan struct{}
 }
 
 // GetState return currentTerm and whether this server
@@ -146,6 +150,8 @@ type AppendEntriesArgs struct {
 	PrevLogTerm   int
 	Entries       []Log
 	LeadersCommit int // leaders commit index
+
+	Target uint
 }
 
 // AppendEntriesReply handle reply of append entries
@@ -186,11 +192,18 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// but different terms), delete the existing entry and all that
 	// follow it
 	if len(rf.log) != 0 && len(args.Entries) > 0 {
+		fmt.Printf("before entries , %d at : %d \n", len(rf.log), rf.me)
 		if len(rf.log)-1 == args.PrevLogIndex &&
 			rf.currentTerm != uint(args.PrevLogTerm) {
+			fmt.Printf("before truncating, len = %d at : %d \n", len(rf.log), rf.me)
 			rf.log = rf.log[:len(rf.log)-1]
+			fmt.Printf("truncating , %d at : %d \n", len(rf.log), rf.me)
 		}
 		rf.log = append(rf.log, args.Entries...)
+	} else if len(rf.log) == 0 {
+		fmt.Printf("before entries at zero log , %d at : %d \n", len(rf.log), rf.me)
+		rf.log = append(rf.log, args.Entries...)
+		fmt.Printf("after entries at zero log , %d at : %d \n", len(rf.log), rf.me)
 	}
 
 	// If leaderCommit > commitIndex, set commitIndex =
@@ -202,7 +215,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	rf.mu.Unlock()
 
-	rf.appendEntriesChan <- args
+	rf.heartbeatChan <- struct{}{}
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
@@ -321,7 +334,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	if !isLeader {
 		return index, term, isLeader
 	}
-	index = len(rf.log) - 1 + 1
+	index = len(rf.log)
 	rf.log = append(rf.log, Log{Term: term, Command: command})
 	term = int(rf.currentTerm)
 
@@ -363,6 +376,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.leader = -1
 	// Your initialization code here (2A, 2B, 2C).
 	rf.appendEntriesChan = make(chan *AppendEntriesArgs, 3) // make non blocking
+	rf.heartbeatChan = make(chan struct{}, 3)
+	rf.commandChan = make(chan string, 3)
+	rf.stopHeartbeatChan = make(chan struct{}, 2)
+
 	rand.Seed(time.Now().Unix())
 
 	rf.matchIndex = make(map[uint]uint)
@@ -454,7 +471,7 @@ func (rf *Raft) loop() {
 func (rf *Raft) followerLoop() {
 	for {
 		select {
-		case <-rf.appendEntriesChan:
+		case <-rf.heartbeatChan:
 		case <-time.After(time.Duration(random(300, 400)) * time.Millisecond):
 			rf.setState(candidateState)
 			return
@@ -467,7 +484,7 @@ func (rf *Raft) candidateLoop() {
 	replyChan := rf.startElection()
 	for rf.getServerState() == candidateState {
 		select {
-		case <-rf.appendEntriesChan:
+		case <-rf.heartbeatChan:
 		case reply := <-replyChan:
 
 			// a candidate wins an election if it receives votes from a majority of the servers in the full cluseter for same term
@@ -507,12 +524,49 @@ func (rf *Raft) updateIndexForFollower() {
 }
 
 func (rf *Raft) leaderLoop() {
+	go rf.runHeartbeat()
+	rf.setHearbeatStatus(false)
 	for rf.getServerState() == leaderState {
-		rf.mu.Lock()
-		rf.sendHeartbeatImmediately()
-		rf.mu.Unlock()
-		time.Sleep(120 * time.Millisecond)
 
+		select {
+		case <-rf.heartbeatChan:
+			// stepdown to follower
+
+		}
+	}
+}
+
+func (rf *Raft) setHearbeatStatus(stop bool) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	if stop {
+		rf.heartbeatRun = false
+	} else {
+		rf.heartbeatRun = true
+	}
+}
+
+func (rf *Raft) getHeartbeatStatus() bool {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	return rf.heartbeatRun
+}
+
+func (rf *Raft) runHeartbeat() {
+	defer func() {
+		fmt.Printf("stopping heartbeat at %d \n", rf.me)
+	}()
+	for {
+		select {
+		case <-rf.stopHeartbeatChan:
+			fmt.Printf("heartbeat stopped at %d \n", rf.me)
+			return
+		case <-time.After(120 * time.Millisecond):
+			rf.mu.Lock()
+			rf.sendHeartbeatImmediately()
+			rf.mu.Unlock()
+		}
 	}
 }
 
