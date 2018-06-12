@@ -22,6 +22,7 @@ import (
 	"math"
 	"math/rand"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/yogyrahmawan/learn_distributed_system/labrpc"
@@ -34,6 +35,10 @@ const (
 	followerState uint = iota
 	candidateState
 	leaderState
+)
+
+const (
+	triggerAppendCommand = "triggerAppendCommand"
 )
 
 //
@@ -260,17 +265,24 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		return
 	}
 
-	if rf.votedFor > 0 && rf.votedFor != int(args.CandidateID) {
+	// Each server will vote for at most one candidate in a given term,
+	// on a first-come-first-served basis (note: Sec- tion 5.4 adds an additional restriction on votes)
+	if (args.Term == rf.currentTerm && rf.votedFor != -1) || (rf.votedFor == int(args.CandidateID)) {
 		return
 	}
+	/*
+		if rf.votedFor == int(args.CandidateID) {
+			return
+		}*/
 
-	// check whether is log up to date
-	if len(rf.log) != 0 {
+	if len(rf.log) > 0 {
 		currentLogData := rf.log[len(rf.log)-1]
-		if (currentLogData.Term != args.LastLogTerm) || (currentLogData.Term == args.LastLogTerm && int(args.LastLogIndex) != len(rf.log)-1) {
+		if (args.LastLogTerm < currentLogData.Term) || (currentLogData.Term != args.LastLogTerm && int(args.LastLogIndex) < len(rf.log)) {
+			fmt.Println("invalid log")
 			return
 		}
 	}
+	rf.votedFor = int(args.CandidateID)
 
 	reply.VoteGranted = true
 }
@@ -410,8 +422,23 @@ func (rf *Raft) buildAndSendAppendEntry(k int, currentTerm uint, leaderID int, p
 	}
 
 	reply := AppendEntriesReply{}
-	rf.sendAppendEntries(k, &args, &reply)
 
+	timeoutChan := make(chan bool)
+	go func(timeOutChan chan bool, reply *AppendEntriesReply) {
+		ok := rf.sendAppendEntries(k, &args, reply)
+		timeOutChan <- ok
+	}(timeoutChan, &reply)
+
+	select {
+	case <-timeoutChan:
+		if reply.Success {
+			rf.appendEntriesChan <- &args
+		} else {
+			rf.heartbeatChan <- struct{}{}
+		}
+	case <-time.After(200 * time.Millisecond):
+		// do nothing
+	}
 }
 
 func (rf *Raft) sendHeartbeatImmediately() {
@@ -480,20 +507,29 @@ func (rf *Raft) followerLoop() {
 }
 
 func (rf *Raft) candidateLoop() {
-	voteAccepted := 0
+	var voteAccepted int32
 	replyChan := rf.startElection()
 	for rf.getServerState() == candidateState {
 		select {
 		case <-rf.heartbeatChan:
 		case reply := <-replyChan:
+			// suspect to be
 
 			// a candidate wins an election if it receives votes from a majority of the servers in the full cluseter for same term
 			// each server will vote at most 1 canditate in given term
 			if reply.VoteGranted {
-				voteAccepted++
+				//voteAccepted++
+				atomic.AddInt32(&voteAccepted, int32(voteAccepted)+1)
+				//fmt.Printf("vote granted at : %d, voted : %d\n", rf.me, atomic.LoadInt32(&voteAccepted))
+
 			}
 
-			if voteAccepted >= (len(rf.peers)/2)+1 {
+			if rf.getServerState() != candidateState {
+				return
+			}
+
+			//fmt.Printf("vote accepted : %d at me : %d, len(peers) : %d \n", voteAccepted, rf.me, len(rf.peers))
+			if atomic.LoadInt32(&voteAccepted) >= int32((len(rf.peers)/2)+1) {
 				rf.mu.Lock()
 				if rf.leader == -1 {
 					rf.leader = rf.me
@@ -501,11 +537,13 @@ func (rf *Raft) candidateLoop() {
 
 					// transition to be leader
 					// set index
+					fmt.Printf("got leader %d \n", rf.me)
 					rf.updateIndexForFollower()
-					rf.sendHeartbeatImmediately()
+					//rf.sendHeartbeatImmediately()
 				}
 
 				rf.mu.Unlock()
+				return
 			}
 		case <-time.After(time.Duration(random(300, 400)) * time.Millisecond):
 			return
@@ -531,7 +569,65 @@ func (rf *Raft) leaderLoop() {
 		select {
 		case <-rf.heartbeatChan:
 			// stepdown to follower
+		case args := <-rf.appendEntriesChan:
+			//fmt.Println("get append entries chan")
+			rf.handleAppendEntriesAndQuorum(args)
+		case cmd := <-rf.commandChan:
+			fmt.Println("hanle command")
+			rf.handleCommand(cmd)
 
+		}
+	}
+}
+
+func (rf *Raft) handleCommand(cmd string) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	switch cmd {
+	case triggerAppendCommand:
+		fmt.Println("trigger append entries")
+		rf.triggerAppendEntries()
+	}
+}
+
+func (rf *Raft) handleAppendEntriesAndQuorum(args *AppendEntriesArgs) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	rf.matchIndex[uint(args.Target)] = uint(args.PrevLogIndex + len(args.Entries))
+	rf.nextIndex[uint(args.Target)] = uint(args.PrevLogIndex + len(args.Entries) + 1)
+
+	// If there exists an N such that N > commitIndex, a majority
+	// of matchIndex[i] ≥ N, and log[N].term == currentTerm: set commitIndex = N (§5.3, §5.4).
+	lastIdx := uint(len(rf.log))
+	for N := rf.commitIndex; N < lastIdx; N++ {
+		quorum := 0
+		for p := range rf.matchIndex {
+			if p == uint(rf.me) {
+				quorum++
+				continue
+			}
+
+			val := rf.matchIndex[p]
+			if val >= N {
+				quorum++
+			}
+		}
+
+		//fmt.Printf("quorum : %d \n", quorum)
+		//fmt.Printf("committedIndex : %d \n", rf.commitIndex)
+		//fmt.Printf("logTerm : %d, currentTerm : %d \n", rf.log[N-1].Term, rf.currentTerm)
+
+		if uint(quorum) > N/2+1 {
+			//fmt.Printf("len(log) = %d \n", len(rf.log))
+			if N <= 0 {
+				rf.commitIndex = uint(len(rf.log))
+			} else {
+				fmt.Printf("term = %d, currentTerm = %d \n", rf.log[N-1].Term, rf.currentTerm)
+				if uint(rf.log[N-1].Term) == rf.currentTerm {
+					rf.commitIndex = N
+				}
+			}
 		}
 	}
 }
@@ -603,9 +699,24 @@ func (rf *Raft) startElection() chan *RequestVoteReply {
 
 			reply := RequestVoteReply{}
 
-			rf.sendRequestVote(i, &args, &reply)
+			//rf.sendRequestVote(i, &args, &reply)
 
-			replyChan <- &reply
+			//replyChan <- &reply
+
+			timeoutChan := make(chan bool)
+			go func(timeOutChan chan bool, reply *RequestVoteReply) {
+				ok := rf.sendRequestVote(i, &args, reply)
+				timeOutChan <- ok
+			}(timeoutChan, &reply)
+
+			select {
+			case <-timeoutChan:
+				replyChan <- &reply
+			case <-time.After(500 * time.Millisecond):
+				replyChan <- &RequestVoteReply{
+					VoteGranted: false,
+				}
+			}
 		}(i, lastLogIdx, lastLogTerm, rf.currentTerm, rf.votedFor)
 	}
 
