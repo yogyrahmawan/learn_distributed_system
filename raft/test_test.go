@@ -55,23 +55,32 @@ func TestReElection2A(t *testing.T) {
 
 	cfg.begin("Test (2A): election after network failure")
 
+	fmt.Println("check one leader ================")
 	leader1 := cfg.checkOneLeader()
 	// if the leader disconnects, a new one should be elected.
+	fmt.Printf("disconnect leader = %d =============== \n", leader1)
 	cfg.disconnect(leader1)
+	fmt.Println("check again ============")
 	cfg.checkOneLeader()
 	// if the old leader rejoins, that shouldn't
 	// disturb the new leader.
+	fmt.Println("leader reconnect =============")
 	cfg.connect(leader1)
+	fmt.Println("check one leader after reconnect ============")
 	leader2 := cfg.checkOneLeader()
 	// if there's no quorum, no leader should
 	// be elected.
+	fmt.Printf("disconnect leader2 = %d =============== \n", leader2)
 	cfg.disconnect(leader2)
 	cfg.disconnect((leader2 + 1) % servers)
 	time.Sleep(2 * RaftElectionTimeout)
+	fmt.Println("check noleader")
 	cfg.checkNoLeader()
 
 	// if a quorum arises, it should elect a leader.
+	fmt.Println("reconnect after someserver")
 	cfg.connect((leader2 + 1) % servers)
+	fmt.Println("Thereis should be one leader")
 	cfg.checkOneLeader()
 
 	// re-join of last node shouldn't prevent leader from existing.
@@ -94,7 +103,9 @@ func TestBasicAgree2B(t *testing.T) {
 		if nd > 0 {
 			t.Fatalf("some have committed before Start()")
 		}
-
+		fmt.Println("=-=-=-=-=-=-=")
+		fmt.Println("running one")
+		fmt.Println("=-=-=-=-=-=-=")
 		xindex := cfg.one(index*100, servers, false)
 		if xindex != index {
 			t.Fatalf("got index %v but expected %v", xindex, index)
@@ -104,6 +115,7 @@ func TestBasicAgree2B(t *testing.T) {
 	cfg.end()
 }
 
+/*
 func TestFailAgree2B(t *testing.T) {
 	servers := 3
 	cfg := make_config(t, servers, false)
@@ -111,30 +123,41 @@ func TestFailAgree2B(t *testing.T) {
 
 	cfg.begin("Test (2B): agreement despite follower disconnection")
 
+	fmt.Println("test 101************")
 	cfg.one(101, servers, false)
 
 	// follower network disconnection
 	leader := cfg.checkOneLeader()
+	fmt.Printf("DISCONNECTING server : %d \n", (leader+1)%servers)
 	cfg.disconnect((leader + 1) % servers)
 
 	// agree despite one disconnected server?
+	fmt.Println("test 102************")
 	cfg.one(102, servers-1, false)
+	fmt.Println("test 103************")
 	cfg.one(103, servers-1, false)
+	fmt.Println("Election timeout blabla")
 	time.Sleep(RaftElectionTimeout)
+	fmt.Println("test 104************")
 	cfg.one(104, servers-1, false)
+	fmt.Println("test 105************")
 	cfg.one(105, servers-1, false)
 
 	// re-connect
 	cfg.connect((leader + 1) % servers)
-
+	fmt.Printf("TESTING RECONNECTING LEADER + 1 = %d   ============================= \n", (leader+1)%servers)
 	// agree with full set of servers?
+	fmt.Println("test106*******************")
 	cfg.one(106, servers, true)
+	fmt.Println("Election timeout 106")
 	time.Sleep(RaftElectionTimeout)
+	fmt.Println("test107*******************")
 	cfg.one(107, servers, true)
 
 	cfg.end()
 }
 
+/*
 func TestFailNoAgree2B(t *testing.T) {
 	servers := 5
 	cfg := make_config(t, servers, false)
@@ -506,7 +529,7 @@ loop:
 
 	cfg.end()
 }
-
+*/
 func TestPersist12C(t *testing.T) {
 	servers := 3
 	cfg := make_config(t, servers, false)
