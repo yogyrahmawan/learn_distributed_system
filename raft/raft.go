@@ -38,8 +38,6 @@ const (
 
 const (
 	triggerAppendCommand = "triggerAppendCommand"
-	heartbeatmode        = "heartbeat"
-	logreplicationmode   = "logreplication"
 )
 
 //
@@ -180,7 +178,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	reply.Success = false
 	reply.Term = rf.currentTerm
-	if args.Term < rf.currentTerm || (args.Term == rf.currentTerm && !logOk) {
+
+	if args.Term < rf.currentTerm || (args.Term >= rf.currentTerm && !logOk) {
 		rf.mu.Unlock()
 		return
 	}
@@ -190,7 +189,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
-
 	}
 
 	if rf.state != followerState {
@@ -199,11 +197,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			rf.stopHeartbeatChan <- struct{}{}
 		}
 	}
+	rf.heartbeatChan <- struct{}{}
 
 	// if existing entry conflicts with a new one (same index
 	// but different terms), delete the existing entry and all that
 	// follow it
-	if len(rf.log) != 0 && len(args.Entries) > 0 {
+	if len(rf.log) > 0 && len(args.Entries) > 0 {
 		index := args.PrevLogIndex + 1
 		var newLog []Log
 		for i, entry := range args.Entries {
@@ -223,17 +222,19 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.log = append(rf.log, newLog...)
 	} else if len(rf.log) == 0 {
 		rf.log = append(rf.log, args.Entries...)
+
 	}
 
 	// If leaderCommit > commitIndex, set commitIndex =
 	// min(leaderCommit, index of last new entry)
 	if uint(args.LeadersCommit) > rf.commitIndex {
 		rf.commitIndex = uint(math.Min(float64(args.LeadersCommit), float64(len(rf.log))))
+
 	}
 
 	rf.mu.Unlock()
 	rf.commitChan <- struct{}{}
-	rf.heartbeatChan <- struct{}{}
+
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
@@ -270,39 +271,51 @@ type RequestVoteReply struct {
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	// Raft determines which of two logs is more up-to-date
+	// by comparing the index and term of the last entries in the logs.
+	// If the logs have last entries with different terms,
+	// then the log with the later term is more up-to-date.
+	// If the logs end with the same term,
+	// then whichever log is longer is more up-to-date.
 
-	// Reply false if term < currentTerm
-	reply.Term = rf.currentTerm
+	shouldVote := false
+	if rf.currentTerm <= args.Term {
+		//Candidate in higher term
+		if len(rf.log) > 0 {
+
+			lastLog := rf.log[len(rf.log)-1]
+			if lastLog.Term > args.LastLogTerm {
+				shouldVote = false
+			} else if lastLog.Term == args.LastLogTerm &&
+				len(rf.log) > args.LastLogIndex {
+				shouldVote = false
+			} else {
+				shouldVote = true
+			}
+		} else {
+			if args.LastLogIndex < len(rf.log) {
+				shouldVote = false
+			} else {
+				shouldVote = true
+			}
+		}
+
+		if rf.currentTerm == args.Term {
+			if rf.votedFor == -1 {
+				shouldVote = true
+			} else {
+				shouldVote = false
+			}
+		}
+	}
+
 	reply.VoteGranted = false
-	if args.Term < rf.currentTerm {
-		return
+	reply.Term = rf.currentTerm
+	if shouldVote {
+		reply.VoteGranted = true
+		rf.votedFor = int(args.CandidateID)
+		rf.requestVoteChan <- struct{}{}
 	}
-
-	// check already voted or not
-	if rf.votedFor == rf.me && args.Term == rf.currentTerm {
-		return
-	}
-
-	// Each server will vote for at most one candidate in a given term,
-	// on a first-come-first-served basis (note: Sec- tion 5.4 adds an additional restriction on votes)
-	//DPrintf("at second term, args.Term = %d, currentTerm = %d, votedFor = %d at = %d, from = %d \n", args.Term, rf.currentTerm, rf.votedFor, rf.me, args.CandidateID)
-	if rf.votedFor == int(args.CandidateID) {
-		return
-	}
-
-	if len(rf.log) > 0 {
-		currentLogData := rf.log[len(rf.log)-1]
-		if currentLogData.Term != args.LastLogTerm || int(args.LastLogIndex) < len(rf.log) {
-			return
-		}
-	} else {
-		if args.LastLogIndex < len(rf.log) {
-			return
-		}
-	}
-	rf.votedFor = int(args.CandidateID)
-	reply.VoteGranted = true
-	rf.requestVoteChan <- struct{}{}
 }
 
 //
@@ -367,8 +380,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.log = append(rf.log, Log{Term: int(rf.currentTerm), Command: command})
 	index = len(rf.log)
 	term = int(rf.currentTerm)
-
-	rf.commandChan <- triggerAppendCommand
 
 	return index, term, isLeader
 }
@@ -508,9 +519,6 @@ func (rf *Raft) leaderLoop() {
 	go rf.runHeartbeat()
 	rf.setHearbeatStatus(false)
 
-	if rf.getLogLength() > 0 {
-		go rf.triggerAppendEntries()
-	}
 	for rf.getServerState() == leaderState {
 		select {
 		case <-rf.requestVoteChan:
@@ -676,7 +684,15 @@ func (rf *Raft) getServerState() uint {
 	return rf.state
 }
 
-func (rf *Raft) buildAndSendAppendEntry(k int, currentTerm uint, leaderID int, prevLogIndex, prevLogTerm int, entries []Log, commitIndex uint, mode string) {
+func (rf *Raft) buildAndSendAppendEntry(k int, currentTerm uint, leaderID int, prevLogIndex, prevLogTerm int, entries []Log, commitIndex uint) {
+	failures := 0
+	retry := false
+SEND:
+	if failures > 0 {
+		select {
+		case <-time.After(12 * time.Millisecond):
+		}
+	}
 	args := AppendEntriesArgs{
 		Term:          currentTerm,
 		LeaderID:      leaderID,
@@ -686,6 +702,14 @@ func (rf *Raft) buildAndSendAppendEntry(k int, currentTerm uint, leaderID int, p
 		Entries:       entries,
 		Target:        uint(k),
 	}
+
+	if args.PrevLogIndex <= 0 && retry {
+		rf.appendEntriesReplyChan <- AppendEntriesReply{
+			Success: false,
+		}
+		return
+	}
+
 	reply := AppendEntriesReply{}
 	timeoutChan := make(chan bool)
 	fnSendWithTimeout := func(timeoutChan chan bool, reply *AppendEntriesReply, args *AppendEntriesArgs) {
@@ -699,8 +723,18 @@ func (rf *Raft) buildAndSendAppendEntry(k int, currentTerm uint, leaderID int, p
 		if reply.Success {
 			rf.appendEntriesChan <- &args
 		} else {
-			if currentTerm >= reply.Term && mode == logreplicationmode {
-				rf.replicateUponFailure(k, rf.currentTerm, &args)
+			if currentTerm >= reply.Term {
+				if prevLogIndex == 0 {
+					rf.appendEntriesReplyChan <- AppendEntriesReply{
+						Success: false,
+					}
+					return
+				}
+				prevLogIndex = prevLogIndex - 1
+				failures++
+				retry = true
+				rf.setNextIndex(uint(k), uint(prevLogIndex))
+				goto SEND
 			} else {
 				rf.appendEntriesReplyChan <- reply
 			}
@@ -711,62 +745,16 @@ func (rf *Raft) buildAndSendAppendEntry(k int, currentTerm uint, leaderID int, p
 
 }
 
-func (rf *Raft) replicateUponFailure(k int, currentTerm uint, args *AppendEntriesArgs) {
-	timeoutChan := make(chan bool)
-	reply := AppendEntriesReply{}
-	for {
-		if args.PrevLogIndex == 0 {
-			rf.appendEntriesReplyChan <- AppendEntriesReply{
-				Success: false,
-			}
-			return
-		}
-
-		args.PrevLogIndex = args.PrevLogIndex - 1
-		args.Entries = rf.getLogFromUntilEnd(args.PrevLogIndex)
-		go func(k int, args *AppendEntriesArgs, reply *AppendEntriesReply) {
-			ok := rf.sendAppendEntries(k, args, reply)
-			timeoutChan <- ok
-		}(k, args, &reply)
-
-		select {
-		case <-timeoutChan:
-			if reply.Success {
-				rf.appendEntriesChan <- args
-				return
-			}
-			if currentTerm < reply.Term {
-				rf.appendEntriesReplyChan <- reply
-				return
-			}
-		case <-time.After(12 * time.Millisecond):
-			// do nothing
-		}
-	}
+func (rf *Raft) setNextIndex(peer, k uint) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	rf.nextIndex[peer] = k
 }
 
 func (rf *Raft) getLogFromUntilEnd(from int) []Log {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	return rf.log[from:len(rf.log)]
-}
-
-func (rf *Raft) sendHeartbeatImmediately() {
-	if rf.leader != rf.me || rf.state != leaderState {
-		return
-	}
-	for k := 0; k < len(rf.peers); k++ {
-		if k == rf.me {
-			continue
-		}
-		prevLogIndex := int(rf.nextIndex[uint(k)]) - 1
-		prevLogTerm := 0
-		if prevLogIndex > 0 {
-			prevLogTerm = rf.log[prevLogIndex-1].Term
-		}
-
-		go rf.buildAndSendAppendEntry(k, rf.currentTerm, rf.leader, int(prevLogIndex), prevLogTerm, []Log{}, rf.commitIndex, heartbeatmode)
-	}
 }
 
 func (rf *Raft) triggerAppendEntries() {
@@ -783,7 +771,7 @@ func (rf *Raft) triggerAppendEntries() {
 
 		lastEntry := uint(math.Min(float64(len(rf.log)), float64(rf.nextIndex[uint(k)]-1)))
 
-		go rf.buildAndSendAppendEntry(k, rf.currentTerm, rf.leader, int(prevLogIndex), prevLogTerm, rf.log[int(lastEntry):len(rf.log)], rf.commitIndex, logreplicationmode)
+		go rf.buildAndSendAppendEntry(k, rf.currentTerm, rf.leader, int(prevLogIndex), prevLogTerm, rf.log[int(lastEntry):len(rf.log)], rf.commitIndex)
 	}
 }
 
@@ -878,7 +866,7 @@ func (rf *Raft) getHeartbeatStatus() bool {
 
 func (rf *Raft) runHeartbeat() {
 	rf.mu.Lock()
-	rf.sendHeartbeatImmediately()
+	rf.triggerAppendEntries()
 	rf.mu.Unlock()
 
 	for {
@@ -887,7 +875,7 @@ func (rf *Raft) runHeartbeat() {
 			return
 		case <-time.After(110 * time.Millisecond):
 			rf.mu.Lock()
-			rf.sendHeartbeatImmediately()
+			rf.triggerAppendEntries()
 			rf.mu.Unlock()
 		}
 	}
