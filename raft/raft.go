@@ -685,10 +685,9 @@ func (rf *Raft) getServerState() uint {
 }
 
 func (rf *Raft) buildAndSendAppendEntry(k int, currentTerm uint, leaderID int, prevLogIndex, prevLogTerm int, entries []Log, commitIndex uint) {
-	failures := 0
 	retry := false
 SEND:
-	if failures > 0 {
+	if retry {
 		select {
 		case <-time.After(12 * time.Millisecond):
 		}
@@ -710,6 +709,10 @@ SEND:
 		return
 	}
 
+	if retry {
+		args.Entries = rf.getLogFromUntilEnd(args.PrevLogIndex)
+	}
+
 	reply := AppendEntriesReply{}
 	timeoutChan := make(chan bool)
 	fnSendWithTimeout := func(timeoutChan chan bool, reply *AppendEntriesReply, args *AppendEntriesArgs) {
@@ -724,14 +727,13 @@ SEND:
 			rf.appendEntriesChan <- &args
 		} else {
 			if currentTerm >= reply.Term {
-				if prevLogIndex == 0 {
+				if prevLogIndex <= 0 {
 					rf.appendEntriesReplyChan <- AppendEntriesReply{
 						Success: false,
 					}
 					return
 				}
 				prevLogIndex = prevLogIndex - 1
-				failures++
 				retry = true
 				rf.setNextIndex(uint(k), uint(prevLogIndex))
 				goto SEND
@@ -739,8 +741,10 @@ SEND:
 				rf.appendEntriesReplyChan <- reply
 			}
 		}
-	case <-time.After(300 * time.Millisecond):
-		// do nothing
+	case <-time.After(time.Duration(200) * time.Millisecond):
+		if retry {
+			goto SEND
+		}
 	}
 
 }
