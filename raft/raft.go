@@ -104,9 +104,6 @@ type Raft struct {
 // GetState return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
-	//fmt.Println("GETSTATEBEFOREUNLOCK")
-	//rf.mu.Lock()
-	//defer rf.mu.Unlock()
 	return int(rf.getCurrentTerm()), rf.getLeader() == rf.me
 }
 
@@ -172,28 +169,17 @@ type AppendEntriesReply struct {
 
 // AppendEntries implement append entries rpc
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	//DPrintf("before printing log , lenlog = %d , args.PrevLogIndex = %d, rf.currentTerm = %d, prevLogTerm = %d, args.Term = %d, leader = %d, at : %d \n", len(rf.log), args.PrevLogIndex, rf.currentTerm, args.PrevLogTerm, args.Term, args.LeaderID, rf.me)
 	rf.mu.Lock()
-	//DPrintf("after printing log , lenlog = %d , args.PrevLogIndex = %d, rf.currentTerm = %d, prevLogTerm = %d, args.Term = %d, leader = %d, at : %d \n", len(rf.log), args.PrevLogIndex, rf.currentTerm, args.PrevLogTerm, args.Term, args.LeaderID, rf.me)
 
 	logOk := (args.PrevLogIndex == 0) ||
 		(args.PrevLogIndex > 0 && args.PrevLogIndex <= len(rf.log) &&
 			args.PrevLogTerm == rf.log[args.PrevLogIndex-1].Term)
-
-	//DPrintf("before printing log , lenlog = %d , args.PrevLogIndex = %d, rf.currentTerm = %d, prevLogTerm = %d, args.Term = %d, leader = %d, at : %d \n", len(rf.log), args.PrevLogIndex, rf.currentTerm, args.PrevLogTerm, args.Term, args.LeaderID, rf.me)
-	//DPrintf("BEFORE==PRINTING LOG, logOK = %v, ****** at %d \n", logOk, rf.me)
-	/*for _, v := range rf.log {
-		DPrintf("at %d, value = %d \n", rf.me, v)
-	}*/
-	//DPrintf("BEFORE==END PRINTING LOG ***** at %d \n", rf.me)
 
 	reply.Success = false
 	reply.Term = rf.currentTerm
 	reply.CommitIndex = int(rf.commitIndex)
 
 	if args.Term < rf.currentTerm || (args.Term >= rf.currentTerm && !logOk) {
-		//if args.Term < rf.currentTerm || (args.Term == rf.currentTerm && !logOk && rf.state == followerState) {
-		//DPrintf("returning, logOk = %v , args.Term = %d, currentTerm = %d, args.PrevLogIndex = %d, args.PrevLogTerm= %d , len(rf.log) = %d, at = %d \n", logOk, args.Term, rf.currentTerm, args.PrevLogIndex, args.PrevLogTerm, len(rf.log), rf.me)
 		rf.mu.Unlock()
 		return
 	}
@@ -208,24 +194,15 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if rf.state != followerState {
 		rf.state = followerState
 		if rf.heartbeatRun {
-			//DPrintf("before stop heartbeat run, step down at %d \n", rf.me)
 			rf.stopHeartbeatChan <- struct{}{}
-			//DPrintf("after stop heartbeat run, step down at %d \n", rf.me)
 		}
 	}
-	//DPrintf("before send heartbeat run at %d \n", rf.me)
 	rf.heartbeatChan <- struct{}{}
-	//DPrintf("after send heartbeat run at %d \n", rf.me)
 
 	// if existing entry conflicts with a new one (same index
 	// but different terms), delete the existing entry and all that
 	// follow it
 	if len(rf.log) > 0 && len(args.Entries) > 0 {
-		/*if args.PrevLogIndex > 0 {
-			DPrintf("before entries more than zero , len(args.Entries) = %d, lenlog = %d , args.PrevLogIndex = %d, rf.currentTerm = %d, prevLogTerm = %d, localLogTerm = %d, at : %d \n", len(args.Entries), len(rf.log), args.PrevLogIndex, rf.currentTerm, args.PrevLogTerm, rf.log[args.PrevLogIndex-1].Term, rf.me)
-		} else {
-			DPrintf("before entries , len(args.Entries) = %d, lenlog = %d , args.PrevLogIndex = %d, rf.currentTerm = %d, prevLogTerm = %d, localLogTerm = %d, at : %d \n", len(args.Entries), len(rf.log), args.PrevLogIndex, rf.currentTerm, args.PrevLogTerm, rf.log[args.PrevLogIndex].Term, rf.me)
-		}*/
 		index := args.PrevLogIndex + 1
 		var newLog []Log
 		for i, entry := range args.Entries {
@@ -244,15 +221,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 		rf.log = append(rf.log, newLog...)
 	} else if len(rf.log) == 0 {
-		//DPrintf("before entries at zero log, length of entries %d , %d at : %d \n", len(args.Entries), len(rf.log), rf.me)
 		rf.log = append(rf.log, args.Entries...)
 	}
-
-	/*DPrintf("PRINTING LOG ****** at %d \n", rf.me)
-	for _, v := range rf.log {
-		DPrintf("at %d, value = %d \n", rf.me, v)
-	}
-	DPrintf("END PRINTING LOG ***** at %d \n", rf.me)*/
 
 	// If leaderCommit > commitIndex, set commitIndex =
 	// min(leaderCommit, index of last new entry)
@@ -260,10 +230,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.commitIndex = uint(math.Min(float64(args.LeadersCommit), float64(len(rf.log))))
 
 	}
-	//DPrintf("before commit chan at %d \n", rf.me)
 	rf.mu.Unlock()
 	rf.commitChan <- struct{}{}
-	//DPrintf("end commit chan at %d \n", rf.me)
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
