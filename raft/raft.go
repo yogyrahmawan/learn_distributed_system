@@ -18,7 +18,6 @@ package raft
 //
 
 import (
-	"fmt"
 	"math"
 	"math/rand"
 	"sync"
@@ -381,7 +380,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	if !isLeader {
 		return index, term, isLeader
 	}
-	fmt.Printf("START got command %v \n", command)
 	rf.log = append(rf.log, Log{Term: int(rf.currentTerm), Command: command})
 	index = len(rf.log)
 	term = int(rf.currentTerm)
@@ -473,11 +471,9 @@ func (rf *Raft) candidateLoop() {
 	rf.incrementTerm()
 	replyChan := rf.startElection()
 	for rf.getServerState() == candidateState {
-		fmt.Printf("run candidate loop at %d \n", rf.me)
 		select {
 		case <-rf.requestVoteChan:
 		case <-rf.heartbeatChan:
-			DPrintf("candidate loop got heartbeat at %d \n", rf.me)
 		case reply := <-replyChan:
 
 			// a candidate wins an election if it receives votes from a majority of the servers in the full cluseter for same term
@@ -530,7 +526,6 @@ func (rf *Raft) leaderLoop() {
 func (rf *Raft) startElection() chan *RequestVoteReply {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	fmt.Printf("Start Election at %d \n", rf.me)
 	rf.leader = -1
 	rf.votedFor = rf.me
 	rf.state = candidateState
@@ -651,24 +646,19 @@ func (rf *Raft) getLogFromUntilEnd(from int) []Log {
 func (rf *Raft) triggerAppendEntries() {
 	doneChan := make(chan struct{}, len(rf.peers))
 	for k := 0; k < len(rf.peers); k++ {
-		//fmt.Println("Masuk sini")
 		if k == rf.me {
 			doneChan <- struct{}{}
 			continue
 		}
 
-		//prevLogIndex := int(rf.nextIndex[uint(k)]) - 1
 		prevLogIndex := int(rf.getNextIndexAt(uint(k))) - 1
 		prevLogTerm := 0
 		if prevLogIndex > 0 {
-			//prevLogTerm = rf.log[prevLogIndex-1].Term
 			prevLogTerm = rf.getLogAt(prevLogIndex - 1).Term
 		}
 
-		//lastEntry := uint(math.Min(float64(len(rf.log)), float64(rf.nextIndex[uint(k)]-1)))
 		lastEntry := uint(math.Min(float64(rf.getLenOfLog()), float64(rf.getNextIndexAt(uint(k))-1)))
 
-		// prevent goroutine leaked
 		go rf.buildAndSendAppendEntry(k, rf.getCurrentTerm(),
 			rf.getLeader(), int(prevLogIndex),
 			prevLogTerm, rf.log[int(lastEntry):rf.getLenOfLog()],
@@ -677,7 +667,6 @@ func (rf *Raft) triggerAppendEntries() {
 
 	for k := 0; k < len(rf.peers); k++ {
 		<-doneChan
-		fmt.Printf("done at %d \n", k)
 	}
 
 	lastIdx := uint(rf.getLenOfLog())
