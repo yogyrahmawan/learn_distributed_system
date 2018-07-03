@@ -18,3 +18,4 @@ See instructions dir for lab instructions
 [raft_paper](https://raft.github.io/raft.pdf)
 
 * Lab 2A : Leader election
+* Lab 2B : Leader Replication
