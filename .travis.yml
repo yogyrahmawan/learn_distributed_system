@@ -7,5 +7,6 @@ script:
   - cd mapreduce && go test -race -run TestParallel && cd ..
   - cd mapreduce && go test -race -run Failure && cd ..
   - cd raft && go test -race -run 2A && cd ..
+  - cd raft && go test -race -run 2B && cd ..
 notifications:
   email: false
