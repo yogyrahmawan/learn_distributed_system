@@ -19,3 +19,6 @@ See instructions dir for lab instructions
 
 * Lab 2A : Leader election
 * Lab 2B : Leader Replication
+
+### Additional Readings 
+* [the design of practical system for fault-tolerance virtual machines](http://nil.csail.mit.edu/6.824/2016/papers/vm-ft.pdf)
