@@ -22,3 +22,4 @@ See instructions dir for lab instructions
 
 ### Additional Readings 
 * [the design of practical system for fault-tolerance virtual machines](http://nil.csail.mit.edu/6.824/2016/papers/vm-ft.pdf)
+* [spinnaker] (https://pdos.csail.mit.edu/6.824/papers/spinnaker.pdf)
